@@ -72,3 +72,33 @@ def universe():
     extra = pd.DataFrame([{"Kode": k, "Perusahaan": f"[CONTOH] {v}", "Sektor": "Lainnya", "Harga": None,
                            "Kapitalisasi": 1.5e11} for k, v in SMALL_CAPS.items()])
     return pd.concat([df, extra], ignore_index=True)
+
+
+def intraday(code):
+    rng = np.random.default_rng(len(code) * 7)
+    day = pd.Timestamp(datetime.now().date())
+    idx = list(pd.date_range(day + pd.Timedelta(hours=9), day + pd.Timedelta(hours=11, minutes=55), freq="5min")) + \
+        list(pd.date_range(day + pd.Timedelta(hours=13, minutes=30), day + pd.Timedelta(hours=15, minutes=55), freq="5min"))
+    base = 120 if code in SMALL_CAPS else 1000
+    close = base * np.exp(np.cumsum(rng.normal(0.0005, 0.004, len(idx))))
+    return pd.DataFrame({"Open": close * (1 - rng.uniform(-0.002, 0.002, len(idx))), "Close": close,
+                         "High": close * (1 + rng.uniform(0, 0.003, len(idx))),
+                         "Low": close * (1 - rng.uniform(0, 0.003, len(idx))),
+                         "Volume": rng.integers(2e4, 4e5, len(idx))}, index=pd.DatetimeIndex(idx))
+
+
+def holders(code):
+    from holders import classify
+    rows = [("[CONTOH] PT Induk Pengendali", 55.2, True), ("[CONTOH] Templeton Asset Management Ltd", 8.1, False),
+            ("[CONTOH] Budi Santoso", 6.3, False), ("Masyarakat", 30.4, False)]
+    if code in SMALL_CAPS:
+        rows = [("[CONTOH] PT Investama Pengendali", 72.5, True), ("[CONTOH] Andi Wijaya", 19.0, False),
+                ("Masyarakat", 8.5, False)]
+    major = pd.DataFrame([{"Pemegang": n, "Jenis": classify(n), "Jumlah saham": p * 1e8, "Persen": p, "Pengendali": c}
+                          for n, p, c in rows])
+    yahoo = {"insider": 61.0, "institusi": 12.4, "daftar": pd.DataFrame([
+        {"Pemegang": "[CONTOH] Vanguard Group Inc", "Jenis": "Institusi", "Jumlah saham": 2.1e8, "Persen": 1.2,
+         "Tanggal laporan": datetime.now().date()},
+        {"Pemegang": "[CONTOH] iShares Core MSCI EM ETF", "Jenis": "Reksa dana", "Jumlah saham": 9.0e7, "Persen": 0.5,
+         "Tanggal laporan": datetime.now().date()}])}
+    return major, yahoo, "Data contoh"

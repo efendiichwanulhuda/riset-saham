@@ -44,6 +44,11 @@ Biaya per analisis kira-kira beberapa ratus sampai sekitar dua ribu rupiah, terg
   7. Fundamental: Keystats per kuartal (pendapatan, laba bersih, EPS, Tahunan, TTM, pertumbuhan YoY) dan rasio dengan penilaian (murah/wajar/mahal)
   8. Analisis AI lengkap
   9. Semua berita terkait
+
+  Di atas laporan ada pilihan **Gaya trading**:
+  - **🏦 Investasi**: level harga, grafik, fundamental (Keystats + rasio), **pemegang saham** (pengendali, institusi asing, perorangan, porsi publik/free float, diagram kepemilikan), analisis AI, dan berita.
+  - **⚡ Scalping**: level harga, **money flow detail** (uang masuk vs keluar per 5 menit dan per jam dengan VWAP, serta 20 hari terakhir dengan penanda "uang besar"), peta volume, akumulasi, broker summary (siapa yang beli/jual hari ini), pemegang saham, analisis AI, dan berita.
+  - **📊 Lengkap**: semua bagian.
 - **Analisis AI** (opsional): laporan lengkap per saham, lihat bagian di atas.
 - **Semua berita**: daftar berita terbaru dengan kode saham yang terdeteksi.
 - **Pantau saham tertentu**: ketik kode (misalnya `BBCA, ANTM`) di sidebar untuk mencari berita khusus saham itu.
@@ -56,13 +61,15 @@ Aplikasi mengambil daftar semua emiten dari Yahoo Finance, atau dari situs BEI k
 ## Sumber data
 
 - Berita: Google News (RSS), CNBC Indonesia, Kontan, Bisnis, IDX Channel. Sumber yang gagal dilewati, dan statusnya terlihat di sidebar.
-- Harga: Yahoo Finance (kode `.JK`), tertunda sekitar 10–15 menit dari harga real-time.
+- Harga: Yahoo Finance (kode `.JK`), harian dan per 5 menit, tertunda sekitar 10–15 menit dari harga real-time.
+- Pemegang saham: profil emiten di situs BEI (pemegang di atas 5% dan masyarakat) dan Yahoo Finance (institusi/reksa dana). Kalau situs BEI menolak akses dari server, aplikasi menampilkan panduan cek manual di Stockbit/KSEI.
 
 ## Mengubah isi
 
 - `tickers.py`: daftar saham likuid (sekitar 90) beserta alias nama untuk deteksi berita.
 - `universe.py`: pengambil daftar semua saham BEI.
 - `brokers.py`: kamus kode broker.
+- `holders.py`: pemegang saham besar (situs BEI + Yahoo Finance) dan penggolongannya.
 - `news.py`: daftar sumber berita (`FEEDS`) dan kamus kata sentimen (`LEXICON`).
 - `analysis.py`: level harga, peta volume, akumulasi/distribusi, checklist, aturan fraksi dan ARA/ARB.
 - `prices.py`: rumus skor teknikal dan data fundamental.

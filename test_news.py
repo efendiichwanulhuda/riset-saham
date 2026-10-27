@@ -58,3 +58,24 @@ def test_any_listed_code_detected_in_news():
     import news
     news.KNOWN_CODES.add("DOOH")
     assert news.detect_tickers("Saham DOOH melonjak hari ini") == ["DOOH"]
+
+
+def test_holders_and_money_flow():
+    import demo
+    import holders
+    from analysis import intraday_flow, money_flow_daily, scalping_checks
+
+    assert holders.classify("Masyarakat") == "Masyarakat (publik < 5%)"
+    assert holders.classify("Templeton Asset Management Ltd") == "Institusi asing"
+    assert holders.classify("PT Dwimuria Investama Andalan") == "Institusi/perusahaan lokal"
+    major, _, _ = demo.holders("DOOH")
+    s = holders.summarize(major)
+    assert round(s["free_float"], 1) == 8.5 and s["top_pct"] == 72.5
+    assert any(flag == "🔥" for flag, _ in holders.checks(s))
+
+    hist = demo.history(["BBCA"])["BBCA"]
+    table, sm = money_flow_daily(hist)
+    assert len(table) == 20 and abs(table["Kumulatif (Rp M)"].iloc[-1] - sm["net_20d"]) < 1e-6
+    bars, hourly, isum = intraday_flow(demo.intraday("BBCA"))
+    assert len(hourly) >= 5 and isum["low"] <= isum["vwap"] <= isum["high"]
+    assert scalping_checks(sm, isum, {"vol_ratio": 1}, None)
