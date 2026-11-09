@@ -286,6 +286,127 @@ def trade_pressure(df: pd.DataFrame, days: int = 10) -> pd.DataFrame:
     return out
 
 
+def money_flow_daily(df: pd.DataFrame, days: int = 20) -> tuple[pd.DataFrame, dict]:
+    """Perkiraan uang masuk vs keluar per hari (dalam rupiah).
+
+    Nilai transaksi harian dibagi ke pembeli dan penjual menurut posisi harga penutupan dalam rentang hari itu.
+    Hari dengan nilai transaksi di atas 2x rata-rata ditandai sebagai "uang besar".
+    """
+    rng = (df["High"] - df["Low"]).replace(0, float("nan"))
+    buy = ((df["Close"] - df["Low"]) / rng).fillna(0.5).clip(0, 1)
+    value = df["Close"] * df["Volume"]
+    avg = value.rolling(20, min_periods=5).mean()
+    t = pd.DataFrame({
+        "Tanggal": df.index.date,
+        "Harga": df["Close"].values,
+        "Perubahan %": df["Close"].pct_change().values * 100,
+        "Nilai (Rp M)": value.values / 1e9,
+        "Uang masuk (Rp M)": (value * buy).values / 1e9,
+        "Uang keluar (Rp M)": (value * (1 - buy)).values / 1e9,
+        "Uang besar": (value > 2 * avg).values,
+    })
+    t["Bersih (Rp M)"] = t["Uang masuk (Rp M)"] - t["Uang keluar (Rp M)"]
+    t = t.tail(days).reset_index(drop=True)
+    t["Kumulatif (Rp M)"] = t["Bersih (Rp M)"].cumsum()
+    net = t["Bersih (Rp M)"]
+    streak = 0
+    for v in net.iloc[::-1]:
+        if (v > 0) != (net.iloc[-1] > 0) or v == 0:
+            break
+        streak += 1
+    big = t[t["Uang besar"]]
+    summary = {
+        "net_1d": float(net.iloc[-1]), "net_5d": float(net.tail(5).sum()), "net_20d": float(net.sum()),
+        "in_pct_5d": float(t["Uang masuk (Rp M)"].tail(5).sum() / max(t["Nilai (Rp M)"].tail(5).sum(), 1e-9) * 100),
+        "streak": streak if net.iloc[-1] > 0 else -streak,
+        "big_in": int((big["Bersih (Rp M)"] > 0).sum()), "big_out": int((big["Bersih (Rp M)"] < 0).sum()),
+        "value_avg": float(t["Nilai (Rp M)"].mean()),
+    }
+    return t, summary
+
+
+def intraday_flow(idf: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict] | None:
+    """Money flow per 5 menit dan per jam untuk hari bursa terakhir, plus VWAP."""
+    if idf is None or idf.empty:
+        return None
+    idf = idf.dropna(subset=["Close"])
+    idf = idf[idf["Volume"] > 0]
+    if idf.empty:
+        return None
+    if idf.index.tz is not None:
+        idf = idf.tz_convert("Asia/Jakarta").tz_localize(None)
+    day = idf.index[-1].date()
+    d = idf[idf.index.date == day]
+    if len(d) < 3:
+        return None
+    tp = (d["High"] + d["Low"] + d["Close"]) / 3
+    value = tp * d["Volume"]
+    direction = d["Close"].diff()
+    if "Open" in d:
+        direction.iloc[0] = d["Close"].iloc[0] - d["Open"].iloc[0]
+    bars = pd.DataFrame({
+        "Waktu": d.index,
+        "Jam": d.index.strftime("%H:00"),
+        "Harga": d["Close"].values,
+        "VWAP": (value.cumsum() / d["Volume"].cumsum()).values,
+        "Uang masuk (Rp M)": value.where(direction > 0, 0).values / 1e9,
+        "Uang keluar (Rp M)": value.where(direction < 0, 0).values / 1e9,
+    })
+    bars["Bersih (Rp M)"] = bars["Uang masuk (Rp M)"] - bars["Uang keluar (Rp M)"]
+    bars["Kumulatif (Rp M)"] = bars["Bersih (Rp M)"].cumsum()
+    hourly = bars.groupby("Jam").agg(**{
+        "Harga akhir": ("Harga", "last"), "Uang masuk (Rp M)": ("Uang masuk (Rp M)", "sum"),
+        "Uang keluar (Rp M)": ("Uang keluar (Rp M)", "sum"), "Bersih (Rp M)": ("Bersih (Rp M)", "sum")}).reset_index()
+    price, vwap = float(bars["Harga"].iloc[-1]), float(bars["VWAP"].iloc[-1])
+    summary = {"tanggal": day, "harga": price, "vwap": vwap, "vs_vwap": (price / vwap - 1) * 100,
+               "net": float(bars["Bersih (Rp M)"].sum()), "net_last_hour": float(hourly["Bersih (Rp M)"].iloc[-1]),
+               "high": float(d["High"].max()), "low": float(d["Low"].min())}
+    return bars, hourly, summary
+
+
+def scalping_checks(daily: dict, intra: dict | None, ind: dict, lv: dict | None) -> list[tuple[str, str]]:
+    out = []
+    if intra:
+        if intra["vs_vwap"] > 0:
+            out.append(("✅", f"Harga Rp {intra['harga']:,.0f} di atas VWAP Rp {intra['vwap']:,.0f} "
+                              f"({intra['vs_vwap']:+.1f}%): rata-rata pembeli hari ini sedang untung, pembeli masih pegang kendali."))
+        else:
+            out.append(("⚠️", f"Harga di bawah VWAP Rp {intra['vwap']:,.0f} ({intra['vs_vwap']:+.1f}%): pembeli hari ini rata-rata rugi, "
+                              "rawan tekanan jual."))
+        out.append(("✅" if intra["net"] > 0 else "⚠️", f"Uang bersih hari bursa terakhir Rp {intra['net']:+,.2f} M, "
+                    f"jam terakhir Rp {intra['net_last_hour']:+,.2f} M."))
+    out.append(("✅" if daily["net_5d"] > 0 else "⚠️", f"Uang bersih 5 hari Rp {daily['net_5d']:+,.1f} M "
+                f"({daily['in_pct_5d']:.0f}% dari nilai transaksi tergolong uang masuk)."))
+    if daily["streak"] >= 3:
+        out.append(("✅", f"Uang masuk {daily['streak']} hari berturut-turut."))
+    elif daily["streak"] <= -3:
+        out.append(("⚠️", f"Uang keluar {-daily['streak']} hari berturut-turut."))
+    if daily["value_avg"] < 1:
+        out.append(("🔥", f"Rata-rata nilai transaksi hanya Rp {daily['value_avg']:.2f} M per hari: sulit keluar cepat saat scalping."))
+    if ind and ind.get("vol_ratio", 0) >= 2:
+        out.append(("✅", f"Volume hari ini {ind['vol_ratio']:.1f}x rata-rata: saham sedang aktif, cocok untuk trading cepat."))
+    if lv:
+        out.append(("ℹ️", f"Gerak harian rata-rata (ATR) Rp {lv['atr']:,.0f} = {lv['atr'] / lv['harga'] * 100:.1f}% "
+                          f"atau sekitar {lv['atr'] / tick_size(lv['harga']):.0f} tick."))
+    return out
+
+
+SCALPING_GUIDE = """
+**Cara pakai money flow untuk scalping:**
+1. **VWAP** (harga rata-rata tertimbang volume hari ini) adalah garis "kendali". Di atas VWAP = pembeli menang, cari beli saat
+   harga turun mendekati VWAP. Di bawah VWAP = penjual menang, hindari atau tunggu harga kembali ke atas.
+2. **Uang bersih per jam**: kalau tiap jam positif dan harga naik, tren intraday sehat. Harga naik tapi uang bersih negatif
+   sering berarti kenaikan semu (sedikit pembeli mengangkat harga).
+3. **Uang besar** (nilai transaksi di atas 2x rata-rata): ikuti arahnya. Uang besar masuk saat harga baru breakout itu sinyal kuat.
+4. Konfirmasi dengan **broker summary** (siapa yang beli hari ini) dan **trade book** di Stockbit: banyak HAKA (beli di harga
+   offer) di harga yang sama berarti pembeli agresif.
+5. Selalu pasang **stop loss 1–3 tick** di bawah support/VWAP. Scalping di saham bertransaksi kecil sangat berisiko karena
+   kamu bisa tidak dapat pembeli saat mau keluar.
+
+Data intraday dari Yahoo tertunda sekitar 10–15 menit, jadi untuk eksekusi tetap lihat order book live di Stockbit.
+"""
+
+
 # ---------- Screener ----------
 
 PRESETS = {

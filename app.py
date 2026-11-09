@@ -6,16 +6,21 @@ Jalankan:  streamlit run app.py
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 import ai_analysis
 import analysis
+import holders
 import news
 import prices
+import research
 import universe
 from brokers import BROKERS
 from tickers import TICKERS
@@ -57,7 +62,7 @@ DISCLAIMER = (
 )
 
 
-@st.cache_data(ttl=900, show_spinner="Mengambil berita terbaru...")
+@st.cache_data(ttl=900, show_spinner=False)
 def load_news(extra: tuple[str, ...]):
     if DEMO:
         import demo
@@ -67,7 +72,10 @@ def load_news(extra: tuple[str, ...]):
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def load_fundamentals(code: str):
-    return {} if DEMO else prices.fundamentals(code)
+    if DEMO:
+        import demo
+        return demo.fundamentals(code)
+    return prices.fundamentals(code)
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -78,12 +86,50 @@ def load_keystats(code: str):
     return prices.keystats(code)
 
 
-@st.cache_data(ttl=900, show_spinner="Mengambil data harga semua saham...")
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def load_holders(code: str):
+    if DEMO:
+        import demo
+        return demo.holders(code)
+    return holders.load(code)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_intraday(code: str):
+    if DEMO:
+        import demo
+        return demo.intraday(code)
+    try:
+        return prices.intraday(code)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def load_prices(codes: tuple[str, ...]):
     if DEMO:
         import demo
         return demo.history(list(codes))
     return prices.download_history(list(codes))
+
+
+def fetch_parallel(*calls):
+    """Jalankan beberapa fungsi pengambil data sekaligus (bersamaan), bukan satu per satu.
+
+    Hasilnya tetap masuk cache Streamlit, jadi pemanggilan berikutnya langsung cepat.
+    """
+    ctx = get_script_run_ctx()
+
+    def run(fn, args):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        try:
+            return fn(*args)
+        except Exception as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as ex:
+        futures = [ex.submit(run, fn, args) for fn, args in calls]
+        return [f.result() for f in futures]
 
 
 def label(score: float) -> str:
@@ -102,7 +148,7 @@ def fmt_pct(x: float) -> str:
     return "-" if x != x else f"{x:+.1f}%"
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner="Mengambil daftar semua saham BEI...")
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
 def load_universe():
     if DEMO:
         import demo
@@ -110,6 +156,11 @@ def load_universe():
     return universe.load()
 
 
+with st.spinner("Mengambil daftar saham, harga, dan berita terbaru (sekaligus)..."):
+    _pre = fetch_parallel((load_universe, ()), (load_prices, (tuple(sorted(TICKERS)),)), (load_news, ((),)))
+    for _r in _pre:
+        if isinstance(_r, Exception):
+            raise _r
 uni, uni_source = load_universe()
 UNI = {r.Kode: (r.Perusahaan, r.Sektor, r.Kapitalisasi) for r in uni.itertuples()}
 for _code, (_name, _sector, _) in TICKERS.items():
@@ -147,7 +198,11 @@ if DEMO:
     st.warning("Mode DEMO: semua berita dan harga di bawah adalah DATA CONTOH, bukan data pasar asli.")
 st.info(DISCLAIMER)
 
-articles, status = load_news(tuple(f"saham {c}" for c in watch))
+if watch:
+    with st.spinner("Mengambil berita saham yang dipantau..."):
+        articles, status = load_news(tuple(f"saham {c}" for c in watch))
+else:
+    articles, status = load_news(())
 agg = news.aggregate_by_ticker(articles)
 for c in watch:
     agg.setdefault(c, {"count": 0, "positive": 0, "negative": 0, "news_score": 0.0, "articles": []})
@@ -202,6 +257,145 @@ if not table_all.empty:
 table = table_all[table_all["Kode"].isin(news_codes)] if not table_all.empty else table_all
 if only_positive and not table.empty:
     table = table[table["Skor"] > 0]
+
+ALL_SECTIONS = ("riset_fund", "riset_mf", "level", "grafik", "peta", "akumulasi", "moneyflow", "broker", "fundamental", "holders", "ai", "berita")
+MODES = {
+    "📊 Lengkap": set(ALL_SECTIONS),
+    "🏦 Investasi": {"riset_fund", "level", "grafik", "fundamental", "holders", "ai", "berita"},
+    "⚡ Scalping": {"riset_mf", "level", "grafik", "moneyflow", "peta", "akumulasi", "broker", "holders", "ai", "berita"},
+}
+
+
+def render_money_flow(daily, intra, ind, lv):
+    if daily is None:
+        st.caption("Data harga belum cukup.")
+        return
+    table, sm = daily
+    if intra:
+        bars, hourly, isum = intra
+        st.markdown(f"#### Hari bursa terakhir ({isum['tanggal'].strftime('%d %b %Y')}), per 5 menit")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Harga vs VWAP", f"Rp {isum['harga']:,.0f}", f"{isum['vs_vwap']:+.1f}% dari VWAP Rp {isum['vwap']:,.0f}")
+        m2.metric("Uang bersih hari itu", f"Rp {isum['net']:+,.2f} M", "masuk" if isum["net"] > 0 else "keluar",
+                  delta_color="normal" if isum["net"] > 0 else "inverse")
+        m3.metric("Jam terakhir", f"Rp {isum['net_last_hour']:+,.2f} M", delta_color="off")
+        m4.metric("Rentang hari itu", f"Rp {isum['low']:,.0f} – {isum['high']:,.0f}")
+        price = alt.Chart(bars.melt(id_vars="Waktu", value_vars=["Harga", "VWAP"], var_name="Garis", value_name="Rp")).mark_line().encode(
+            x=alt.X("Waktu:T", title=None, axis=alt.Axis(format="%H:%M")), y=alt.Y("Rp:Q", scale=alt.Scale(zero=False)),
+            color=alt.Color("Garis:N", scale=alt.Scale(domain=["Harga", "VWAP"], range=["#1e88e5", "#fb8c00"]),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("Waktu:T", format="%H:%M"), "Garis:N", alt.Tooltip("Rp:Q", format=",.0f")]).properties(height=220)
+        flow = alt.Chart(bars).mark_bar().encode(
+            x=alt.X("Waktu:T", title=None, axis=alt.Axis(format="%H:%M")), y=alt.Y("Bersih (Rp M):Q", title="Uang bersih (Rp M)"),
+            color=alt.condition("datum['Bersih (Rp M)'] > 0", alt.value("#43a047"), alt.value("#e53935")),
+            tooltip=[alt.Tooltip("Waktu:T", format="%H:%M"), alt.Tooltip("Bersih (Rp M):Q", format="+,.3f")]).properties(height=140)
+        st.altair_chart(alt.vconcat(price, flow).resolve_scale(x="shared"), width="stretch")
+        st.markdown("**Ringkasan per jam**")
+        st.dataframe(hourly, hide_index=True, width="stretch",
+                     column_order=["Jam", "Bersih (Rp M)", "Harga akhir", "Uang masuk (Rp M)", "Uang keluar (Rp M)"],
+                     column_config={"Harga akhir": st.column_config.NumberColumn(format="Rp %d"),
+                                    "Bersih (Rp M)": st.column_config.NumberColumn(format="%+.2f"),
+                                    **{c: st.column_config.NumberColumn(format="%.2f") for c in ("Uang masuk (Rp M)", "Uang keluar (Rp M)")}})
+        st.caption("Rp M = miliar rupiah.")
+    else:
+        st.caption("Data per 5 menit tidak tersedia saat ini (misalnya di luar jam bursa atau Yahoo sedang gagal).")
+
+    st.markdown("#### Uang masuk vs keluar 20 hari terakhir")
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Bersih hari terakhir", f"Rp {sm['net_1d']:+,.1f} M")
+    d2.metric("Bersih 5 hari", f"Rp {sm['net_5d']:+,.1f} M", f"{sm['in_pct_5d']:.0f}% uang masuk", delta_color="off")
+    d3.metric("Bersih 20 hari", f"Rp {sm['net_20d']:+,.1f} M")
+    d4.metric("Hari uang besar", f"{sm['big_in']} masuk / {sm['big_out']} keluar", delta_color="off")
+    chart_df = table.assign(Tanggal=pd.to_datetime(table["Tanggal"]))
+    bars_d = alt.Chart(chart_df).mark_bar().encode(
+        x=alt.X("Tanggal:T", title=None, axis=alt.Axis(format="%d %b")), y=alt.Y("Bersih (Rp M):Q", title="Uang bersih (Rp M)"),
+        color=alt.condition("datum['Bersih (Rp M)'] > 0", alt.value("#43a047"), alt.value("#e53935")),
+        tooltip=["Tanggal:T", alt.Tooltip("Bersih (Rp M):Q", format="+,.2f"), alt.Tooltip("Nilai (Rp M):Q", format=",.2f")])
+    cum = alt.Chart(chart_df).mark_line(color="#1e88e5", point=True).encode(
+        x="Tanggal:T", y=alt.Y("Kumulatif (Rp M):Q", title="Kumulatif (Rp M)"))
+    st.altair_chart(alt.layer(bars_d, cum).resolve_scale(y="independent").properties(height=240), width="stretch")
+    st.caption("Batang = uang bersih per hari (hijau masuk, merah keluar). Garis biru = total sejak 20 hari lalu. "
+               "Perkiraan dari data harga dan volume, bukan data transaksi per broker.")
+    show_t = table.iloc[::-1].assign(**{"Uang besar": table["Uang besar"].iloc[::-1].map({True: "💰 Ya", False: ""})})
+    st.dataframe(show_t, hide_index=True, width="stretch",
+                 column_order=["Tanggal", "Bersih (Rp M)", "Uang besar", "Harga", "Perubahan %", "Nilai (Rp M)",
+                               "Uang masuk (Rp M)", "Uang keluar (Rp M)", "Kumulatif (Rp M)"],
+                 column_config={
+                     "Harga": st.column_config.NumberColumn(format="Rp %d"),
+                     "Perubahan %": st.column_config.NumberColumn(format="%+.1f%%"),
+                     **{c: st.column_config.NumberColumn(format="%+.2f") for c in ("Bersih (Rp M)", "Kumulatif (Rp M)")},
+                     **{c: st.column_config.NumberColumn(format="%.2f") for c in
+                        ("Nilai (Rp M)", "Uang masuk (Rp M)", "Uang keluar (Rp M)")}})
+    if ind:
+        for status, text in analysis.scalping_checks(sm, intra[2] if intra else None, ind, lv):
+            st.markdown(f"{status} {text}")
+    with st.expander("📋 Cara pakai money flow untuk scalping"):
+        st.markdown(analysis.SCALPING_GUIDE)
+
+
+def render_research(res: dict, key: str):
+    if res["kosong"]:
+        st.caption("Data belum cukup untuk membuat riset otomatis.")
+        return
+    c = res["kesimpulan"]
+    getattr(st, c["level"])(f"{c['teks']}\n\n{c['good']} dari {c['total']} poin bernilai positif.")
+    st.caption("Klik tiap poin untuk belajar: apa artinya, cara membacanya, patokan umum, dan arti angkanya untuk saham ini. "
+               "✅ positif · ⚠️ perlu perhatian · 🔴 negatif · ℹ️ informasi.")
+    for title, intro, items in res["groups"]:
+        st.markdown(f"#### {title}")
+        st.caption(intro)
+        for it in items:
+            with st.expander(f"{it['status']} **{it['judul']}**: {it['nilai']}"):
+                st.markdown(f"**📘 Apa ini?** {it['apa']}\n\n"
+                            f"**🔍 Cara membaca:** {it['cara']}\n\n"
+                            f"**📏 Patokan umum:** {it['patokan']}")
+                st.info(f"**Artinya untuk saham ini:** {it['saham']}")
+    with st.container(border=True):
+        st.markdown("**📌 Pelajaran kunci**\n" + "\n".join(f"- {x}" for x in res["pelajaran"]))
+    st.download_button("⬇️ Simpan riset (.md)", research.to_markdown(res), file_name=f"{key}.md", mime="text/markdown", key=f"dl_{key}")
+    st.caption("Dibuat otomatis dari data Yahoo Finance. Patokan adalah aturan praktis umum, bukan rekomendasi investasi.")
+
+
+def render_holders(major, yahoo, summary, status, code):
+    if major is not None and not major.empty:
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Pemegang terbesar", f"{summary['top_pct']:.1f}%" if summary["top_pct"] == summary["top_pct"] else "-",
+                  str(summary["top_name"] or "")[:28], delta_color="off")
+        h2.metric("3 pemegang teratas", f"{summary['top3_pct']:.1f}%")
+        h3.metric("Saham publik (free float)", f"{summary['free_float']:.1f}%" if summary["free_float"] == summary["free_float"] else "-")
+        h4.metric("Institusi asing (>5%)", f"{summary['foreign_pct']:.1f}%")
+        left, right = st.columns([3, 2])
+        with left:
+            st.dataframe(major.sort_values("Persen", ascending=False), hide_index=True, width="stretch",
+                         column_order=["Pemegang", "Persen", "Jenis", "Jumlah saham", "Pengendali"], column_config={
+                "Jumlah saham": st.column_config.NumberColumn(format="%,.0f"),
+                "Persen": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=100),
+                "Pengendali": st.column_config.CheckboxColumn()})
+        with right:
+            pie = summary["by_type"].reset_index().rename(columns={"Persen": "Porsi"})
+            st.altair_chart(alt.Chart(pie).mark_arc(innerRadius=50).encode(
+                theta="Porsi:Q", color=alt.Color("Jenis:N", legend=alt.Legend(orient="bottom", columns=1, title=None, labelLimit=0)),
+                tooltip=["Jenis:N", alt.Tooltip("Porsi:Q", format=".1f")]).properties(height=280), width="stretch")
+        for s_, text in holders.checks(summary):
+            st.markdown(f"{s_} {text}")
+        st.caption("Sumber: profil emiten di situs BEI (pemegang di atas 5% dan masyarakat), diperbarui berkala. "
+                   "Jenis pemegang ditebak dari nama, jadi cek ulang.")
+    else:
+        st.info("Daftar pemegang saham besar dari BEI belum bisa diambil. Cek langsung di Stockbit (Profile > Shareholders) "
+                "atau idx.co.id dengan panduan di bawah.")
+    if yahoo.get("insider") == yahoo.get("insider") and "insider" in yahoo:
+        st.markdown(f"**Menurut Yahoo Finance:** orang dalam/pengendali memegang sekitar **{yahoo['insider']:.1f}%**, "
+                    f"institusi sekitar **{yahoo.get('institusi', float('nan')):.1f}%**.")
+    if isinstance(yahoo.get("daftar"), pd.DataFrame):
+        with st.expander("🏛️ Institusi & reksa dana yang tercatat memegang (Yahoo Finance)"):
+            st.dataframe(yahoo["daftar"], hide_index=True, width="stretch", column_config={
+                "Jumlah saham": st.column_config.NumberColumn(format="%,.0f"),
+                "Persen": st.column_config.NumberColumn(format="%.2f%%")})
+    with st.expander("📖 Cara cek pemegang saham lebih detail"):
+        st.markdown(holders.HOLDER_GUIDE)
+    st.caption(f"Status sumber: {status}")
+    st.link_button(f"📲 Lihat pemegang saham {code} di Stockbit", stockbit_url(code))
+
 
 def stockbit_url(code: str) -> str:
     return f"https://stockbit.com/symbol/{code}"
@@ -269,7 +463,11 @@ with tab_screen:
     scope = st.radio("Cakupan", [f"Saham likuid ({len(history)})", f"Semua saham BEI ({len(uni)})"], horizontal=True,
                      help="Semua saham BEI termasuk saham kecil yang jarang dibahas. Pengambilan datanya lebih lama (1–2 menit), "
                           "lalu disimpan 1 jam.")
-    s_hist = load_prices(tuple(sorted(uni["Kode"]))) if scope.startswith("Semua") else history
+    if scope.startswith("Semua"):
+        with st.spinner("Mengambil harga semua saham BEI (pertama kali bisa 1–2 menit, setelah itu tersimpan 15 menit)..."):
+            s_hist = load_prices(tuple(sorted(uni["Kode"])))
+    else:
+        s_hist = history
     st.caption(f"Menyaring {len(s_hist)} saham memakai data harga harian, termasuk yang tidak sedang diberitakan.")
     preset = st.radio("Strategi", list(analysis.PRESETS), horizontal=True)
     st.info(analysis.PRESETS[preset])
@@ -346,11 +544,27 @@ with tab_detail:
         code = st.selectbox("Pilih saham", options,
                             format_func=lambda c: f"{c} · {name_of(c)}",
                             help="Ketik kode atau nama untuk mencari di antara semua saham BEI.")
+        mode = st.segmented_control(
+            "Gaya trading", list(MODES), default="📊 Lengkap", key="mode",
+            help="Investasi: fokus fundamental dan pemegang saham. Scalping: fokus money flow, VWAP, dan broker.") or "📊 Lengkap"
+        show = MODES[mode].__contains__
+        keycaps = "1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣ 🔟".split()
+        counter = iter(range(1, 100))
+
+        def section(title: str):
+            n = next(counter)
+            st.markdown(f"### {keycaps[n - 1] if n <= len(keycaps) else f'{n}.'} {title}")
+
         name, sector = name_of(code), sector_of(code)
         hist = history.get(code)
         if hist is None:
-            hist = load_prices((code,)).get(code)
+            with st.spinner(f"Mengambil harga {code}..."):
+                hist = load_prices((code,)).get(code)
         r = build_row(code, hist)
+        with st.spinner(f"Mengambil data {code} (sekaligus)..."):
+            fetch_parallel((load_fundamentals, (code,)), (load_keystats, (code,)),
+                           *([(load_holders, (code,))] if show("holders") else []),
+                           *([(load_intraday, (code,))] if show("moneyflow") else []))
         fund = load_fundamentals(code)
         ind = inds[code]
         if hist is not None and len(hist) >= 30:
@@ -385,8 +599,19 @@ with tab_detail:
             with st.expander("Tips kalau mau ikut saham spekulatif"):
                 st.markdown(analysis.GORENGAN_GUIDE)
 
+        major, yahoo_holders, holder_status = load_holders(code) if show("holders") else (None, {}, "")
+        holder_sum = holders.summarize(major)
+        mf_daily = analysis.money_flow_daily(hist) if hist is not None and len(hist) >= 30 else None
+        intra = analysis.intraday_flow(load_intraday(code)) if show("moneyflow") else None
+        mode_checks = []
+        if mode.startswith("⚡") and mf_daily and ind:
+            mode_checks = analysis.scalping_checks(mf_daily[1], intra[2] if intra else None, ind, lv)
+        elif mode.startswith("🏦"):
+            mode_checks = holders.checks(holder_sum)
+        checks = checks + [c for c in mode_checks if c[0] in ("✅", "⚠️", "🔥")]
+
         # 1. Ringkasan
-        st.markdown("### 1️⃣ Ringkasan cepat")
+        section("Ringkasan cepat")
         if checks:
             good = sum(1 for s, _ in checks if s == "✅")
             ratio = good / len(checks)
@@ -398,13 +623,24 @@ with tab_detail:
             else:
                 st.error(f"**Kondisi belum mendukung.** {msg}")
             for status, text in checks:
+                status = "⚠️" if status == "🔥" else status
                 st.markdown(f"{status} {text}")
         else:
             st.caption("Data harga belum cukup untuk analisis detail.")
 
-        if lv:
+        if show("riset_fund"):
+            section("Riset fundamental (sambil belajar)")
+            render_research(research.fundamental(code, sector, fund, load_keystats(code), ind["harga"] if ind else None),
+                            f"riset-fundamental-{code}")
+
+        if show("riset_mf"):
+            section("Riset money flow (sambil belajar)")
+            render_research(research.money_flow(code, mf_daily, intra, acc, ind, lv,
+                                                analysis.trade_pressure(hist) if lv else None), f"riset-moneyflow-{code}")
+
+        if lv and show("level"):
             # 2. Level harga
-            st.markdown("### 2️⃣ Level harga penting")
+            section("Level harga penting")
             st.caption("Dihitung dari support/resistance, zona volume terbesar, dan rata-rata gerak harian (ATR). "
                        "Sudah dibulatkan ke fraksi harga BEI.")
             levels = pd.DataFrame([
@@ -426,8 +662,9 @@ with tab_detail:
                        + " · ".join(f"{k} Rp {v:,.0f}" for k, v in piv.items())
                        + ". Batas ARA/ARB adalah perkiraan, cek aturan BEI terbaru.")
 
+        if lv and show("grafik"):
             # 3. Grafik
-            st.markdown("### 3️⃣ Grafik harga & level")
+            section("Grafik harga & level")
             df = hist[["Close"]].rename(columns={"Close": "Harga"})
             df["MA20"] = df["Harga"].rolling(20).mean()
             df["MA50"] = df["Harga"].rolling(50).mean()
@@ -443,8 +680,9 @@ with tab_detail:
                 tooltip=["Level:N", alt.Tooltip("Rp:Q", format=",.0f")])
             st.altair_chart((price_chart + rules).resolve_scale(color="independent").properties(height=320), width="stretch")
 
+        if lv and show("peta"):
             # 4. Peta volume
-            st.markdown("### 4️⃣ Peta volume per harga (pengganti order book)")
+            section("Peta volume per harga (pengganti order book)")
             st.caption("Di rentang harga mana transaksi paling banyak terjadi selama 60 hari terakhir. Batang panjang = "
                        "banyak pembeli dan penjual pernah bertemu di sana, biasanya jadi support (di bawah harga) "
                        "atau resistance (di atas harga). Batang merah = posisi harga sekarang.")
@@ -463,10 +701,11 @@ with tab_detail:
                     tooltip=["rentang:N", alt.Tooltip("persen:Q", format=".1f"), alt.Tooltip("volume:Q", format=",.0f")],
                 ).properties(height=alt.Step(28)), width="stretch")
             st.info("Order book asli (antrian bid/offer), broker summary, dan foreign flow tidak tersedia gratis. "
-                    "Cek langsung di Stockbit dengan panduan di bagian 6.")
+                    "Cek langsung di Stockbit dengan panduan di bagian Broker summary.")
 
+        if lv and show("akumulasi"):
             # 5. Akumulasi
-            st.markdown("### 5️⃣ Akumulasi atau distribusi?")
+            section("Akumulasi atau distribusi?")
             a1, a2, a3, a4 = st.columns(4)
             a1.metric("Kesimpulan", acc["verdict"])
             a2.metric("Hari naik bervolume besar", acc["acc_days"], f"vs {acc['dist_days']} hari turun", delta_color="off")
@@ -505,107 +744,128 @@ with tab_detail:
                 "Jual %": st.column_config.NumberColumn(format="%.0f%%"),
             })
 
-        # 6. Broker summary & order book
-        st.markdown("### 6️⃣ Broker summary (bandarmologi) & order book")
-        st.caption("Data broker summary (broker mana yang membeli/menjual, misalnya AK, ZP, YP) tidak tersedia gratis, "
-                   "jadi ambil dari Stockbit: buka saham ini > Broker Summary > screenshot, lalu upload di sini. "
-                   "AI akan membaca dan menganalisisnya.")
-        with st.container(border=True):
-            shots = st.file_uploader("Screenshot broker summary (boleh lebih dari satu)", type=["png", "jpg", "jpeg", "webp"],
-                                     accept_multiple_files=True, key=f"bs_{code}")
-            pasted = st.text_area("Atau tempel teks broker summary di sini", key=f"bst_{code}", height=100,
-                                  placeholder="Contoh: AK beli 12.500 lot avg 230; YP jual 8.000 lot avg 228; ...")
-            broker_key = f"broker_{code}"
+        if lv and show("moneyflow"):
+            section("Money flow detail (uang masuk vs keluar)")
+            render_money_flow(mf_daily, intra, ind, lv)
+
+        if show("broker"):
+            # 6. Broker summary & order book
+            section("Broker summary (bandarmologi): siapa yang beli & jual hari ini")
+            st.caption("Data broker summary (broker mana yang membeli/menjual, misalnya AK, ZP, YP) tidak tersedia gratis, "
+                       "jadi ambil dari Stockbit: buka saham ini > Broker Summary > screenshot, lalu upload di sini. "
+                       "AI akan membaca dan menganalisisnya.")
+            with st.container(border=True):
+                shots = st.file_uploader("Screenshot broker summary (boleh lebih dari satu)", type=["png", "jpg", "jpeg", "webp"],
+                                         accept_multiple_files=True, key=f"bs_{code}")
+                pasted = st.text_area("Atau tempel teks broker summary di sini", key=f"bst_{code}", height=100,
+                                      placeholder="Contoh: AK beli 12.500 lot avg 230; YP jual 8.000 lot avg 228; ...")
+                broker_key = f"broker_{code}"
+                if not ai_analysis.has_key():
+                    st.caption("Isi ANTHROPIC_API_KEY untuk mengaktifkan analisis broker summary (lihat README).")
+                elif st.button("🔍 Analisis broker summary", disabled=not (shots or pasted.strip()), key=f"bsb_{code}"):
+                    images = [(f.getvalue(), f.type or "image/png") for f in shots or []]
+                    context = (f"Harga terakhir Rp {ind['harga']:,.0f}, perubahan 1 hari {ind['chg_1d']:+.1f}%, "
+                               f"1 bulan {ind['chg_1m']:+.1f}%. " if ind else "") + (
+                               f"Pola volume 20 hari: {acc['verdict']}. Risiko gorengan: {risk_level}." if acc else "")
+                    with st.spinner("AI sedang membaca broker summary..."):
+                        try:
+                            st.session_state[broker_key] = st.write_stream(
+                                ai_analysis.stream_broker_analysis(code, images, pasted, context))
+                        except Exception as exc:
+                            st.error(f"Analisis gagal: {exc}")
+                    st.caption("Dibuat oleh AI dari gambar yang kamu upload dan bisa salah baca. Cek ulang angkanya.")
+                elif broker_key in st.session_state:
+                    st.markdown(st.session_state[broker_key])
+                    st.caption("Dibuat oleh AI dari gambar yang kamu upload dan bisa salah baca. Cek ulang angkanya.")
+                st.link_button(f"📲 Buka {code} di Stockbit", stockbit_url(code))
+            with st.expander("📖 Kamus kode broker (AK, ZP, YP, dll.)"):
+                st.dataframe(pd.DataFrame([{"Kode": k, "Nama": v[0], "Jenis": v[1], "Pengguna utama": v[2]}
+                                           for k, v in BROKERS.items()]), hide_index=True, width="stretch")
+                st.caption("Broker asing/institusi yang terus membeli sering dianggap tanda akumulasi 'uang besar'. Broker ritel "
+                           "(YP, PD, XC, XL) yang dominan membeli sering berarti investor ritel yang sedang masuk. Nama broker bisa "
+                           "berubah karena merger; cek daftar anggota bursa di idx.co.id.")
+            with st.expander("📋 Cara cek order book, trade book & foreign flow di Stockbit"):
+                st.markdown(analysis.ORDERBOOK_GUIDE)
+
+        if show("fundamental"):
+            # 7. Fundamental
+            section("Fundamental")
+            ks = load_keystats(code)
+            if ks:
+                st.markdown("#### Keystats: kinerja per kuartal")
+                for status, text in analysis.keystats_checks(ks):
+                    st.markdown(f"{status} {text}")
+                metric = st.segmented_control("Data", list(ks), default=next(iter(ks)), key=f"ks_{code}") or next(iter(ks))
+                kt = analysis.keystats_table(ks[metric])
+                scale, unit = (1, "Rp per saham") if metric == "EPS" else (1e9, "Rp miliar")
+                vals = kt.astype(float) / scale
+                text = vals.map(lambda v: "-" if pd.isna(v) else f"{v:,.2f}")
+                st.dataframe(text.style.apply(
+                    lambda col: ["color: #c62828" if pd.notna(v) and v < 0 else "" for v in vals[col.name]]),
+                    width="stretch")
+                st.caption(f"Satuan: {unit}. TTM = total 4 kuartal terakhir sampai kuartal terakhir tahun itu. "
+                           "Angka merah = rugi. Sumber Yahoo Finance; kuartal lama kadang tidak tersedia, cek juga Keystats di Stockbit.")
+                st.markdown("#### Rasio")
+            if fund:
+                ft = pd.DataFrame([{"Indikator": k, "Nilai": analysis.format_fundamental(k, v),
+                                    "Penilaian": analysis.interpret_fundamental(k, v)} for k, v in fund.items()])
+                st.table(ft.set_index("Indikator"))
+                st.caption("Sumber Yahoo Finance. Bandingkan dengan saham lain di sektor yang sama.")
+            else:
+                st.caption("Data fundamental tidak tersedia.")
+
+        if show("holders"):
+            section("Pemegang saham: siapa pemilik saham ini")
+            render_holders(major, yahoo_holders, holder_sum, holder_status, code)
+            st.markdown("### 🎓 Belajar: siapa yang bisa menggerakkan harga")
+            render_research(research.holders(code, major, holder_sum, ind["harga"] if ind else None, yahoo_holders),
+                            f"riset-pemegang-{code}")
+
+        if show("ai"):
+            # 8. Analisis AI
+            section("Analisis AI lengkap")
+            report_key = f"ai_{code}"
             if not ai_analysis.has_key():
-                st.caption("Isi ANTHROPIC_API_KEY untuk mengaktifkan analisis broker summary (lihat README).")
-            elif st.button("🔍 Analisis broker summary", disabled=not (shots or pasted.strip()), key=f"bsb_{code}"):
-                images = [(f.getvalue(), f.type or "image/png") for f in shots or []]
-                context = (f"Harga terakhir Rp {ind['harga']:,.0f}, perubahan 1 hari {ind['chg_1d']:+.1f}%, "
-                           f"1 bulan {ind['chg_1m']:+.1f}%. " if ind else "") + (
-                           f"Pola volume 20 hari: {acc['verdict']}. Risiko gorengan: {risk_level}." if acc else "")
-                with st.spinner("AI sedang membaca broker summary..."):
-                    try:
-                        st.session_state[broker_key] = st.write_stream(
-                            ai_analysis.stream_broker_analysis(code, images, pasted, context))
-                    except Exception as exc:
-                        st.error(f"Analisis gagal: {exc}")
-                st.caption("Dibuat oleh AI dari gambar yang kamu upload dan bisa salah baca. Cek ulang angkanya.")
-            elif broker_key in st.session_state:
-                st.markdown(st.session_state[broker_key])
-                st.caption("Dibuat oleh AI dari gambar yang kamu upload dan bisa salah baca. Cek ulang angkanya.")
-            st.link_button(f"📲 Buka {code} di Stockbit", stockbit_url(code))
-        with st.expander("📖 Kamus kode broker (AK, ZP, YP, dll.)"):
-            st.dataframe(pd.DataFrame([{"Kode": k, "Nama": v[0], "Jenis": v[1], "Pengguna utama": v[2]}
-                                       for k, v in BROKERS.items()]), hide_index=True, width="stretch")
-            st.caption("Broker asing/institusi yang terus membeli sering dianggap tanda akumulasi 'uang besar'. Broker ritel "
-                       "(YP, PD, XC, XL) yang dominan membeli sering berarti investor ritel yang sedang masuk. Nama broker bisa "
-                       "berubah karena merger; cek daftar anggota bursa di idx.co.id.")
-        with st.expander("📋 Cara cek order book, trade book & foreign flow di Stockbit"):
-            st.markdown(analysis.ORDERBOOK_GUIDE)
+                st.caption("Isi ANTHROPIC_API_KEY untuk mengaktifkan analisis AI (lihat README).")
+            elif st.button(f"🤖 Buat analisis lengkap {code}", type="primary"):
+                prompt = ai_analysis.build_prompt(
+                    code, name, sector, ind, lv, acc, vp, fund, agg[code]["articles"],
+                    {"total": r["Skor"], "news": r["Skor berita"],
+                     "tech": r["Skor teknikal"] if pd.notna(r["Skor teknikal"]) else 0.0},
+                    [t for _, t in analysis.keystats_checks(load_keystats(code))]
+                    + [f"Risiko gorengan {risk_level}: {f}" for f in risk_flags]
+                + [f"Gaya trading pengguna: {mode}"]
+                + [f"Pemegang saham: {t}" for _, t in holders.checks(holder_sum)]
+                + ([f"Pemegang terbesar: " + "; ".join(f"{r.Pemegang} {r.Persen:.1f}%" for r in major.head(6).itertuples())]
+                   if major is not None else [])
+                + ([f"Money flow: {t}" for _, t in analysis.scalping_checks(mf_daily[1], intra[2] if intra else None, ind, lv)]
+                   if mf_daily and ind else []))
+                with st.container(border=True):
+                    with st.spinner("AI sedang membaca berita, laporan keuangan, dan grafik... (sekitar 1–2 menit)"):
+                        try:
+                            st.session_state[report_key] = st.write_stream(ai_analysis.stream_analysis(prompt))
+                        except Exception as exc:
+                            st.error(f"Analisis gagal: {exc}")
+                    st.caption("Dibuat oleh AI dan bisa keliru. Bukan rekomendasi investasi.")
+            elif report_key in st.session_state:
+                with st.container(border=True):
+                    st.markdown(st.session_state[report_key])
+                    st.caption("Dibuat oleh AI dan bisa keliru. Bukan rekomendasi investasi.")
 
-        # 7. Fundamental
-        st.markdown("### 7️⃣ Fundamental")
-        ks = load_keystats(code)
-        if ks:
-            st.markdown("#### Keystats: kinerja per kuartal")
-            for status, text in analysis.keystats_checks(ks):
-                st.markdown(f"{status} {text}")
-            metric = st.segmented_control("Data", list(ks), default=next(iter(ks)), key=f"ks_{code}") or next(iter(ks))
-            kt = analysis.keystats_table(ks[metric])
-            scale, unit = (1, "Rp per saham") if metric == "EPS" else (1e9, "Rp miliar")
-            vals = kt.astype(float) / scale
-            text = vals.map(lambda v: "-" if pd.isna(v) else f"{v:,.2f}")
-            st.dataframe(text.style.apply(
-                lambda col: ["color: #c62828" if pd.notna(v) and v < 0 else "" for v in vals[col.name]]),
-                width="stretch")
-            st.caption(f"Satuan: {unit}. TTM = total 4 kuartal terakhir sampai kuartal terakhir tahun itu. "
-                       "Angka merah = rugi. Sumber Yahoo Finance; kuartal lama kadang tidak tersedia, cek juga Keystats di Stockbit.")
-            st.markdown("#### Rasio")
-        if fund:
-            ft = pd.DataFrame([{"Indikator": k, "Nilai": analysis.format_fundamental(k, v),
-                                "Penilaian": analysis.interpret_fundamental(k, v)} for k, v in fund.items()])
-            st.table(ft.set_index("Indikator"))
-            st.caption("Sumber Yahoo Finance. Bandingkan dengan saham lain di sektor yang sama.")
-        else:
-            st.caption("Data fundamental tidak tersedia.")
-
-        # 8. Analisis AI
-        st.markdown("### 8️⃣ Analisis AI lengkap")
-        report_key = f"ai_{code}"
-        if not ai_analysis.has_key():
-            st.caption("Isi ANTHROPIC_API_KEY untuk mengaktifkan analisis AI (lihat README).")
-        elif st.button(f"🤖 Buat analisis lengkap {code}", type="primary"):
-            prompt = ai_analysis.build_prompt(
-                code, name, sector, ind, lv, acc, vp, fund, agg[code]["articles"],
-                {"total": r["Skor"], "news": r["Skor berita"],
-                 "tech": r["Skor teknikal"] if pd.notna(r["Skor teknikal"]) else 0.0},
-                [t for _, t in analysis.keystats_checks(load_keystats(code))]
-                + [f"Risiko gorengan {risk_level}: {f}" for f in risk_flags])
-            with st.container(border=True):
-                with st.spinner("AI sedang membaca berita, laporan keuangan, dan grafik... (sekitar 1–2 menit)"):
-                    try:
-                        st.session_state[report_key] = st.write_stream(ai_analysis.stream_analysis(prompt))
-                    except Exception as exc:
-                        st.error(f"Analisis gagal: {exc}")
-                st.caption("Dibuat oleh AI dan bisa keliru. Bukan rekomendasi investasi.")
-        elif report_key in st.session_state:
-            with st.container(border=True):
-                st.markdown(st.session_state[report_key])
-                st.caption("Dibuat oleh AI dan bisa keliru. Bukan rekomendasi investasi.")
-
-        # 9. Berita
-        st.markdown(f"### 9️⃣ Berita terkait ({agg[code]['count']})")
-        for a in sorted(agg[code]["articles"], key=lambda a: a.published, reverse=True):
-            with st.container(border=True):
-                st.markdown(f"{label(a.sentiment)} **[{a.title}]({a.link})**  \n<small>{a.source} · "
-                            f"{a.published.astimezone().strftime('%d %b %Y %H:%M')} · skor {a.sentiment:+.1f}</small>",
-                            unsafe_allow_html=True)
-                if a.summary:
-                    st.write(a.summary)
-                if a.hits:
-                    st.caption("Kata kunci: " + ", ".join(a.hits))
-        st.link_button("Cari berita lain tentang " + code,
-                       f"https://news.google.com/search?q={code}%20saham&hl=id&gl=ID&ceid=ID:id")
+        if show("berita"):
+            # 9. Berita
+            section(f"Berita terkait ({agg[code]['count']})")
+            for a in sorted(agg[code]["articles"], key=lambda a: a.published, reverse=True):
+                with st.container(border=True):
+                    st.markdown(f"{label(a.sentiment)} **[{a.title}]({a.link})**  \n<small>{a.source} · "
+                                f"{a.published.astimezone().strftime('%d %b %Y %H:%M')} · skor {a.sentiment:+.1f}</small>",
+                                unsafe_allow_html=True)
+                    if a.summary:
+                        st.write(a.summary)
+                    if a.hits:
+                        st.caption("Kata kunci: " + ", ".join(a.hits))
+            st.link_button("Cari berita lain tentang " + code,
+                           f"https://news.google.com/search?q={code}%20saham&hl=id&gl=ID&ceid=ID:id")
 
 with tab_news:
     st.subheader(f"{len(articles)} berita terbaru")

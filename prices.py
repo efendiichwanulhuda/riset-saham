@@ -27,6 +27,16 @@ def download_history(codes: list[str], period: str = "6mo") -> dict[str, pd.Data
     return out
 
 
+def intraday(code: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame | None:
+    """Data harga per 5 menit beberapa hari terakhir (tertunda sekitar 15 menit)."""
+    df = yf.download(yahoo_symbol(code), period=period, interval=interval, auto_adjust=False, progress=False)
+    if df is None or df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.dropna(subset=["Close"])
+
+
 def rsi(close: pd.Series, period: int = 14) -> float:
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
