@@ -516,6 +516,110 @@ def money_flow(code: str, daily: tuple | None, intra: tuple | None, acc: dict | 
             "kosong": not groups}
 
 
+# ---------------------------------------------------------------- Pemegang saham
+
+_ROLES = {
+    "Pengendali": (
+        "Pemegang pengendali: pihak yang menentukan arah perusahaan (memilih direksi, menyetujui aksi korporasi). "
+        "Biasanya grup usaha atau keluarga pendiri.",
+        "Pengendali paling bisa menggerakkan harga lewat **aksi korporasi**: tender offer atau buyback (biasanya harga naik), "
+        "right issue, private placement, atau menjual sebagian saham (biasanya harga tertekan). Kalau pengendali menambah "
+        "kepemilikan, itu tanda dia yakin dengan masa depan perusahaannya.",
+        "Pantau Keterbukaan Informasi BEI: pengendali wajib lapor setiap membeli/menjual. Hati-hati kalau porsinya turun terus."),
+    "Institusi asing": (
+        "Dana investasi, bank kustodian, atau perusahaan dari luar negeri. Sering mewakili manajer investasi besar.",
+        "Mereka membeli/menjual dalam jumlah sangat besar, jadi arus **foreign flow** sering menentukan tren harga saham besar. "
+        "Keputusan mereka dipengaruhi kurs rupiah, suku bunga, dan masuk-keluarnya saham dari indeks global (MSCI, FTSE).",
+        "Cek foreign flow (net buy/sell asing) di Stockbit. Asing net buy berhari-hari = akumulasi."),
+    "Institusi/perusahaan lokal": (
+        "Perusahaan, dana pensiun, asuransi, BPJS, atau badan negara (misalnya Danantara) dari dalam negeri.",
+        "Institusi seperti dana pensiun dan asuransi umumnya investor jangka panjang yang menahan harga agar stabil. "
+        "Kalau berbentuk PT, bisa jadi masih satu grup dengan pengendali (perusahaan afiliasi).",
+        "Cek apakah PT ini terafiliasi dengan pengendali (lihat laporan tahunan bagian struktur grup)."),
+    "Perorangan": (
+        "Individu yang memegang di atas 5%. Sering disebut 'investor kakap', bisa pendiri, keluarga pemilik, atau investor besar.",
+        "Satu orang dengan porsi besar bisa menggerakkan harga, apalagi kalau free float kecil. Pembelian atau penjualannya wajib "
+        "dilaporkan, dan pasar sering ikut bereaksi. Kadang nama perorangan dipakai sebagai nominee (atas nama pihak lain).",
+        "Cari nama orang ini di berita dan Keterbukaan Informasi: apakah dia sering masuk saham lain lalu harganya naik tajam?"),
+    "Saham treasuri (dibeli kembali)": (
+        "Saham milik perusahaan sendiri hasil buyback.",
+        "Buyback mengurangi barang di pasar dan menunjukkan perusahaan menganggap harganya murah. Tapi saham ini bisa dijual lagi nanti.",
+        "Cek kapan program buyback berakhir dan apakah saham treasuri akan dijual kembali."),
+    "Masyarakat (publik < 5%)": (
+        "Semua investor yang masing-masing memegang di bawah 5%, termasuk investor ritel seperti kita. Ini disebut free float.",
+        "Inilah 'barang' yang benar-benar diperdagangkan setiap hari. Makin kecil free float, makin mudah harga digerakkan "
+        "oleh sedikit pihak (naik atau turun tajam).",
+        "Free float < 10% rawan digoreng dan bisa terkena aturan free float minimum BEI."),
+}
+
+
+def holders(code: str, major: pd.DataFrame | None, summary: dict, price: float | None, yahoo: dict | None = None) -> dict:
+    yahoo = yahoo or {}
+    people, struct = [], []
+    if major is not None and not major.empty:
+        df = major.dropna(subset=["Persen"]).sort_values("Persen", ascending=False)
+        for _, r in df.iterrows():
+            kind = r["Jenis"]
+            role = "Pengendali" if r.get("Pengendali") or (r["Persen"] >= 50 and not kind.startswith(("Masyarakat", "Saham treasuri"))) else kind
+            apa, cara, pantau = _ROLES.get(role, _ROLES["Perorangan"])
+            shares = _num(r.get("Jumlah saham"))
+            worth = f" Nilainya sekitar **{_rp(shares * price)}** di harga sekarang." if shares and price else ""
+            lot = f" ({shares / 100:,.0f} lot)" if shares else ""
+            if role == "Masyarakat (publik < 5%)":
+                status = GOOD if r["Persen"] >= 20 else WARN if r["Persen"] >= 10 else BAD
+                teks = f"Hanya {r['Persen']:.1f}% saham {code}{lot} yang beredar bebas di pasar.{worth}"
+            else:
+                status = INFO
+                power = ("sangat besar: menentukan hampir semua keputusan" if r["Persen"] >= 50 else
+                         "besar: suaranya berpengaruh di RUPS" if r["Persen"] >= 20 else "terasa bila dia membeli/menjual")
+                teks = (f"{r['Pemegang']} memegang **{r['Persen']:.2f}%** saham {code}{lot}.{worth} "
+                        f"Pengaruhnya {power}.")
+                ff = summary.get("free_float", float("nan")) if summary else float("nan")
+                if ff == ff and ff > 0 and r["Persen"] > ff:
+                    teks += f" Porsinya lebih besar dari seluruh saham publik ({ff:.1f}%), jadi kalau dia menjual, pasar sulit menyerapnya."
+            people.append(_item(status, r["Pemegang"], f"{r['Persen']:.2f}% · {role}", apa, cara, pantau, teks))
+    if summary:
+        top3 = summary["top3_pct"]
+        struct.append(_item(
+            WARN if top3 >= 80 else INFO, "Konsentrasi 3 pemegang teratas", f"{top3:.1f}%",
+            "Total porsi tiga pemegang terbesar (di luar publik).",
+            "Makin terkonsentrasi, makin sedikit pihak yang bisa menentukan harga. Bagus kalau mereka terus menambah, "
+            "berbahaya kalau mereka mulai melepas.",
+            "> 80% sangat terkonsentrasi · 50–80% ada pengendali jelas · < 50% tersebar.",
+            f"Tiga pemegang terbesar {code} menguasai {top3:.1f}% saham."))
+        if summary["foreign_pct"] > 0:
+            struct.append(_item(
+                GOOD, "Porsi institusi asing besar (> 5%)", f"{summary['foreign_pct']:.1f}%",
+                "Total porsi institusi asing yang masing-masing memegang di atas 5%.",
+                "Asing besar biasanya melakukan riset mendalam sebelum masuk, jadi kehadirannya sering dianggap tanda kepercayaan.",
+                "Pantau foreign flow harian untuk melihat apakah mereka menambah atau mengurangi.",
+                f"Institusi asing tercatat memegang {summary['foreign_pct']:.1f}% saham {code}."))
+    ins = _num(yahoo.get("insider"))
+    if ins is not None:
+        struct.append(_item(
+            INFO, "Orang dalam (insider) menurut Yahoo", f"{ins:.1f}%",
+            "Porsi saham yang dipegang pengendali, direksi, dan komisaris.",
+            "Insider yang membeli saham perusahaannya sendiri sering dianggap sinyal positif, karena merekalah yang paling tahu kondisi perusahaan.",
+            "Pantau laporan transaksi direksi/komisaris di Keterbukaan Informasi BEI.",
+            f"Insider {code} memegang sekitar {ins:.1f}%."))
+    groups = [(t, i, its) for t, i, its in (
+        ("👥 Siapa saja pemegangnya dan kenapa penting", "Data dari BEI (pemegang di atas 5% dan publik). Jenis pemegang ditebak dari nama.", people),
+        ("🧩 Struktur kepemilikan", "Gambaran besar siapa yang menguasai saham ini.", struct),
+    ) if its]
+    return {"judul": f"Riset pemegang saham {code}",
+            "kesimpulan": _conclude(groups, f"Struktur pemegang saham {code} **sehat**.",
+                                    f"Struktur pemegang saham {code} **perlu dicermati**: ada pihak besar yang bisa menggerakkan harga.",
+                                    f"Struktur pemegang saham {code} **berisiko**: saham terkonsentrasi dan barang di pasar sedikit."),
+            "groups": groups, "kosong": not groups,
+            "pelajaran": [
+                "Daftar ini dari BEI dan hanya mencatat pemegang **di atas 5%**. Pihak di bawah 5% tidak terlihat namanya.",
+                "Yang paling penting bukan siapa pemegangnya, tapi **perubahan porsinya**: bandingkan laporan KSEI/BEI tiap bulan.",
+                "Pengendali menambah + free float kecil = harga cenderung mudah naik. Pengendali menjual = waspada.",
+                "Untuk melihat siapa yang membeli/menjual **hari ini**, pakai broker summary dan foreign flow, bukan daftar pemegang.",
+                "Kepemilikan besar tidak menjamin harga naik. Gabungkan dengan fundamental dan money flow.",
+            ]}
+
+
 # ---------------------------------------------------------------- Ekspor
 
 

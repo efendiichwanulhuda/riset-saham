@@ -775,6 +775,9 @@ with tab_detail:
         if show("holders"):
             section("Pemegang saham: siapa pemilik saham ini")
             render_holders(major, yahoo_holders, holder_sum, holder_status, code)
+            st.markdown("### 🎓 Belajar: siapa yang bisa menggerakkan harga")
+            render_research(research.holders(code, major, holder_sum, ind["harga"] if ind else None, yahoo_holders),
+                            f"riset-pemegang-{code}")
 
         if show("ai"):
             # 8. Analisis AI

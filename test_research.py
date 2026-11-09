@@ -32,3 +32,14 @@ def test_research_handles_missing_data():
     m = research.money_flow("XXXX", None, None, None, None, None)
     assert f["kosong"] and m["kosong"]
     assert f["kesimpulan"]["total"] == 0
+
+
+def test_holder_research_explains_each_holder():
+    import holders
+    for code in ("BBRI", "DOOH"):
+        major, yahoo, _ = demo.holders(code)
+        res = research.holders(code, major, holders.summarize(major), 120.0, yahoo)
+        names = [it["judul"] for it in res["groups"][0][2]]
+        assert names[0] == major.sort_values("Persen", ascending=False)["Pemegang"].iloc[0]
+        assert len(names) == len(major)
+    assert research.holders("XXXX", None, {}, None)["kosong"]
