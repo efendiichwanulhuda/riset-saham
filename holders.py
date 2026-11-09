@@ -57,7 +57,7 @@ def _num(x) -> float:
 
 def from_idx(code: str) -> pd.DataFrame | None:
     url = f"https://www.idx.co.id/primary/ListedCompany/GetCompanyProfilesDetail?KodeEmiten={code}&language=id-id"
-    r = requests.get(url, headers=HEADERS, timeout=20)
+    r = requests.get(url, headers=HEADERS, timeout=8)
     r.raise_for_status()
     rows = r.json().get("PemegangSaham") or []
     # Persentase kadang ditulis sebagai pecahan (0.55) dan kadang sebagai persen (55.0)

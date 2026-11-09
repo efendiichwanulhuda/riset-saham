@@ -79,3 +79,20 @@ def test_holders_and_money_flow():
     bars, hourly, isum = intraday_flow(demo.intraday("BBCA"))
     assert len(hourly) >= 5 and isum["low"] <= isum["vwap"] <= isum["high"]
     assert scalping_checks(sm, isum, {"vol_ratio": 1}, None)
+
+
+def test_fetch_all_runs_sources_in_parallel(monkeypatch):
+    import time
+    import news
+
+    def slow(url, source, timeout=8):
+        time.sleep(0.3)
+        if "IHSG" in source:
+            raise TimeoutError
+        return []
+
+    monkeypatch.setattr(news, "fetch_feed", slow)
+    start = time.time()
+    _, status = news.fetch_all(["saham BBCA", "saham ANTM"])
+    assert time.time() - start < 0.3 * len(status) / 2
+    assert any(s.startswith("Gagal") for s in status.values()) and any(s.startswith("OK") for s in status.values())

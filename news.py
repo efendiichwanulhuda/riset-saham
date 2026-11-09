@@ -6,6 +6,7 @@ import html
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
@@ -158,7 +159,7 @@ def parse_feed(raw: bytes | str, source: str) -> list[Article]:
     return out
 
 
-def fetch_feed(url: str, source: str, timeout: float = 12) -> list[Article]:
+def fetch_feed(url: str, source: str, timeout: float = 8) -> list[Article]:
     r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout)
     r.raise_for_status()
     return parse_feed(r.content, source)
@@ -170,13 +171,19 @@ def fetch_all(extra_queries: list[str] | None = None) -> tuple[list[Article], di
     for q in extra_queries or []:
         feeds[f"Google News: {q}"] = google_news(f"{q} when:7d")
     articles, status = [], {}
-    for name, url in feeds.items():
+
+    def get(item):
+        name, url = item
         try:
-            items = fetch_feed(url, name)
-            articles.extend(items)
-            status[name] = f"OK ({len(items)} berita)"
+            return name, fetch_feed(url, name), None
         except Exception as exc:  # sumber gagal tidak boleh menghentikan aplikasi
-            status[name] = f"Gagal: {type(exc).__name__}"
+            return name, [], exc
+
+    # Ambil semua sumber bersamaan supaya total waktu = sumber paling lambat, bukan jumlah semuanya
+    with ThreadPoolExecutor(max_workers=min(16, len(feeds) or 1)) as ex:
+        for name, items, exc in ex.map(get, feeds.items()):
+            articles.extend(items)
+            status[name] = f"Gagal: {type(exc).__name__}" if exc else f"OK ({len(items)} berita)"
     seen, unique = set(), []
     for a in sorted(articles, key=lambda a: a.published, reverse=True):
         key = re.sub(r"\W+", "", a.title.lower())[:80]

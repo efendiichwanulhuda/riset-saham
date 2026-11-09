@@ -6,11 +6,14 @@ Jalankan:  streamlit run app.py
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 import ai_analysis
 import analysis
@@ -59,7 +62,7 @@ DISCLAIMER = (
 )
 
 
-@st.cache_data(ttl=900, show_spinner="Mengambil berita terbaru...")
+@st.cache_data(ttl=900, show_spinner=False)
 def load_news(extra: tuple[str, ...]):
     if DEMO:
         import demo
@@ -83,7 +86,7 @@ def load_keystats(code: str):
     return prices.keystats(code)
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Mengambil data pemegang saham...")
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def load_holders(code: str):
     if DEMO:
         import demo
@@ -91,7 +94,7 @@ def load_holders(code: str):
     return holders.load(code)
 
 
-@st.cache_data(ttl=300, show_spinner="Mengambil data per 5 menit...")
+@st.cache_data(ttl=300, show_spinner=False)
 def load_intraday(code: str):
     if DEMO:
         import demo
@@ -102,12 +105,31 @@ def load_intraday(code: str):
         return None
 
 
-@st.cache_data(ttl=900, show_spinner="Mengambil data harga semua saham...")
+@st.cache_data(ttl=900, show_spinner=False)
 def load_prices(codes: tuple[str, ...]):
     if DEMO:
         import demo
         return demo.history(list(codes))
     return prices.download_history(list(codes))
+
+
+def fetch_parallel(*calls):
+    """Jalankan beberapa fungsi pengambil data sekaligus (bersamaan), bukan satu per satu.
+
+    Hasilnya tetap masuk cache Streamlit, jadi pemanggilan berikutnya langsung cepat.
+    """
+    ctx = get_script_run_ctx()
+
+    def run(fn, args):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        try:
+            return fn(*args)
+        except Exception as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as ex:
+        futures = [ex.submit(run, fn, args) for fn, args in calls]
+        return [f.result() for f in futures]
 
 
 def label(score: float) -> str:
@@ -126,7 +148,7 @@ def fmt_pct(x: float) -> str:
     return "-" if x != x else f"{x:+.1f}%"
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner="Mengambil daftar semua saham BEI...")
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
 def load_universe():
     if DEMO:
         import demo
@@ -134,6 +156,11 @@ def load_universe():
     return universe.load()
 
 
+with st.spinner("Mengambil daftar saham, harga, dan berita terbaru (sekaligus)..."):
+    _pre = fetch_parallel((load_universe, ()), (load_prices, (tuple(sorted(TICKERS)),)), (load_news, ((),)))
+    for _r in _pre:
+        if isinstance(_r, Exception):
+            raise _r
 uni, uni_source = load_universe()
 UNI = {r.Kode: (r.Perusahaan, r.Sektor, r.Kapitalisasi) for r in uni.itertuples()}
 for _code, (_name, _sector, _) in TICKERS.items():
@@ -171,7 +198,11 @@ if DEMO:
     st.warning("Mode DEMO: semua berita dan harga di bawah adalah DATA CONTOH, bukan data pasar asli.")
 st.info(DISCLAIMER)
 
-articles, status = load_news(tuple(f"saham {c}" for c in watch))
+if watch:
+    with st.spinner("Mengambil berita saham yang dipantau..."):
+        articles, status = load_news(tuple(f"saham {c}" for c in watch))
+else:
+    articles, status = load_news(())
 agg = news.aggregate_by_ticker(articles)
 for c in watch:
     agg.setdefault(c, {"count": 0, "positive": 0, "negative": 0, "news_score": 0.0, "articles": []})
@@ -432,7 +463,11 @@ with tab_screen:
     scope = st.radio("Cakupan", [f"Saham likuid ({len(history)})", f"Semua saham BEI ({len(uni)})"], horizontal=True,
                      help="Semua saham BEI termasuk saham kecil yang jarang dibahas. Pengambilan datanya lebih lama (1–2 menit), "
                           "lalu disimpan 1 jam.")
-    s_hist = load_prices(tuple(sorted(uni["Kode"]))) if scope.startswith("Semua") else history
+    if scope.startswith("Semua"):
+        with st.spinner("Mengambil harga semua saham BEI (pertama kali bisa 1–2 menit, setelah itu tersimpan 15 menit)..."):
+            s_hist = load_prices(tuple(sorted(uni["Kode"])))
+    else:
+        s_hist = history
     st.caption(f"Menyaring {len(s_hist)} saham memakai data harga harian, termasuk yang tidak sedang diberitakan.")
     preset = st.radio("Strategi", list(analysis.PRESETS), horizontal=True)
     st.info(analysis.PRESETS[preset])
@@ -513,16 +548,23 @@ with tab_detail:
             "Gaya trading", list(MODES), default="📊 Lengkap", key="mode",
             help="Investasi: fokus fundamental dan pemegang saham. Scalping: fokus money flow, VWAP, dan broker.") or "📊 Lengkap"
         show = MODES[mode].__contains__
-        numbers = iter("1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣ 🔟 ⓫ ⓬".split())
+        keycaps = "1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣ 🔟".split()
+        counter = iter(range(1, 100))
 
         def section(title: str):
-            st.markdown(f"### {next(numbers)} {title}")
+            n = next(counter)
+            st.markdown(f"### {keycaps[n - 1] if n <= len(keycaps) else f'{n}.'} {title}")
 
         name, sector = name_of(code), sector_of(code)
         hist = history.get(code)
         if hist is None:
-            hist = load_prices((code,)).get(code)
+            with st.spinner(f"Mengambil harga {code}..."):
+                hist = load_prices((code,)).get(code)
         r = build_row(code, hist)
+        with st.spinner(f"Mengambil data {code} (sekaligus)..."):
+            fetch_parallel((load_fundamentals, (code,)), (load_keystats, (code,)),
+                           *([(load_holders, (code,))] if show("holders") else []),
+                           *([(load_intraday, (code,))] if show("moneyflow") else []))
         fund = load_fundamentals(code)
         ind = inds[code]
         if hist is not None and len(hist) >= 30:
