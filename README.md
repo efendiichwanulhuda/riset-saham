@@ -46,8 +46,8 @@ Biaya per analisis kira-kira beberapa ratus sampai sekitar dua ribu rupiah, terg
   9. Semua berita terkait
 
   Di atas laporan ada pilihan **Gaya trading**:
-  - **🏦 Investasi**: level harga, grafik, fundamental (Keystats + rasio), **pemegang saham** (pengendali, institusi asing, perorangan, porsi publik/free float, diagram kepemilikan), analisis AI, dan berita.
-  - **⚡ Scalping**: level harga, **money flow detail** (uang masuk vs keluar per 5 menit dan per jam dengan VWAP, serta 20 hari terakhir dengan penanda "uang besar"), peta volume, akumulasi, broker summary (siapa yang beli/jual hari ini), pemegang saham, analisis AI, dan berita.
+  - **🏦 Investasi**: **riset fundamental sambil belajar** (valuasi PER/PBV/earnings yield/harga wajar Graham, profitabilitas ROE & margin, pertumbuhan pendapatan & laba, utang, dividen; tiap poin dijelaskan apa artinya, cara membaca, patokan umum, dan arti angkanya untuk saham itu, bisa disimpan sebagai .md), level harga, grafik, fundamental (Keystats + rasio), **pemegang saham** (pengendali, institusi asing, perorangan, porsi publik/free float, diagram kepemilikan), analisis AI, dan berita.
+  - **⚡ Scalping**: **riset money flow sambil belajar** (VWAP, uang bersih hari ini & per jam, arus uang 5/20 hari, hari uang besar, MFI/OBV/A-D, tekanan beli, likuiditas, tick impas setelah fee, ATR, dan contoh rencana scalping; tiap poin dijelaskan dengan bahasa sederhana), level harga, **money flow detail** (uang masuk vs keluar per 5 menit dan per jam dengan VWAP, serta 20 hari terakhir dengan penanda "uang besar"), peta volume, akumulasi, broker summary (siapa yang beli/jual hari ini), pemegang saham, analisis AI, dan berita.
   - **📊 Lengkap**: semua bagian.
 - **Analisis AI** (opsional): laporan lengkap per saham, lihat bagian di atas.
 - **Semua berita**: daftar berita terbaru dengan kode saham yang terdeteksi.
@@ -74,7 +74,8 @@ Aplikasi mengambil daftar semua emiten dari Yahoo Finance, atau dari situs BEI k
 - `analysis.py`: level harga, peta volume, akumulasi/distribusi, checklist, aturan fraksi dan ARA/ARB.
 - `prices.py`: rumus skor teknikal dan data fundamental.
 - `ai_analysis.py`: instruksi dan format laporan Analisis AI.
-- `test_news.py`: tes otomatis (`python -m pytest test_news.py`).
+- `research.py`: riset fundamental dan money flow otomatis yang sekaligus menjelaskan tiap angka.
+- `test_news.py`, `test_research.py`: tes otomatis (`python -m pytest`).
 
 ## Keterbatasan
 

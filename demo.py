@@ -102,3 +102,17 @@ def holders(code):
         {"Pemegang": "[CONTOH] iShares Core MSCI EM ETF", "Jenis": "Reksa dana", "Jumlah saham": 9.0e7, "Persen": 0.5,
          "Tanggal laporan": datetime.now().date()}])}
     return major, yahoo, "Data contoh"
+
+
+def fundamentals(code):
+    rng = np.random.default_rng(len(code) * 13 + ord(code[-1]))
+    small = code in SMALL_CAPS
+    price = 120 if small else 1000
+    return {"Kapitalisasi pasar": 1.5e11 if small else float(rng.uniform(5e12, 9e14)),
+            "PER": float(rng.uniform(-20, 60) if small else rng.uniform(6, 25)),
+            "PBV": float(rng.uniform(0.6, 6)), "ROE": float(rng.uniform(-0.05, 0.3)),
+            "Margin laba bersih": float(rng.uniform(-0.05, 0.3)),
+            "Pertumbuhan pendapatan (YoY)": float(rng.uniform(-0.2, 0.3)),
+            "Pertumbuhan laba (YoY)": float(rng.uniform(-0.4, 0.5)),
+            "Utang/ekuitas": float(rng.uniform(10, 200)), "Dividen yield": float(rng.uniform(0, 7)),
+            "Harga tertinggi 52 minggu": price * 1.6, "Harga terendah 52 minggu": price * 0.7}

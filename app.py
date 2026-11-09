@@ -17,6 +17,7 @@ import analysis
 import holders
 import news
 import prices
+import research
 import universe
 from brokers import BROKERS
 from tickers import TICKERS
@@ -68,7 +69,10 @@ def load_news(extra: tuple[str, ...]):
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def load_fundamentals(code: str):
-    return {} if DEMO else prices.fundamentals(code)
+    if DEMO:
+        import demo
+        return demo.fundamentals(code)
+    return prices.fundamentals(code)
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -223,11 +227,11 @@ table = table_all[table_all["Kode"].isin(news_codes)] if not table_all.empty els
 if only_positive and not table.empty:
     table = table[table["Skor"] > 0]
 
-ALL_SECTIONS = ("level", "grafik", "peta", "akumulasi", "moneyflow", "broker", "fundamental", "holders", "ai", "berita")
+ALL_SECTIONS = ("riset_fund", "riset_mf", "level", "grafik", "peta", "akumulasi", "moneyflow", "broker", "fundamental", "holders", "ai", "berita")
 MODES = {
     "📊 Lengkap": set(ALL_SECTIONS),
-    "🏦 Investasi": {"level", "grafik", "fundamental", "holders", "ai", "berita"},
-    "⚡ Scalping": {"level", "grafik", "moneyflow", "peta", "akumulasi", "broker", "holders", "ai", "berita"},
+    "🏦 Investasi": {"riset_fund", "level", "grafik", "fundamental", "holders", "ai", "berita"},
+    "⚡ Scalping": {"riset_mf", "level", "grafik", "moneyflow", "peta", "akumulasi", "broker", "holders", "ai", "berita"},
 }
 
 
@@ -296,6 +300,29 @@ def render_money_flow(daily, intra, ind, lv):
             st.markdown(f"{status} {text}")
     with st.expander("📋 Cara pakai money flow untuk scalping"):
         st.markdown(analysis.SCALPING_GUIDE)
+
+
+def render_research(res: dict, key: str):
+    if res["kosong"]:
+        st.caption("Data belum cukup untuk membuat riset otomatis.")
+        return
+    c = res["kesimpulan"]
+    getattr(st, c["level"])(f"{c['teks']}\n\n{c['good']} dari {c['total']} poin bernilai positif.")
+    st.caption("Klik tiap poin untuk belajar: apa artinya, cara membacanya, patokan umum, dan arti angkanya untuk saham ini. "
+               "✅ positif · ⚠️ perlu perhatian · 🔴 negatif · ℹ️ informasi.")
+    for title, intro, items in res["groups"]:
+        st.markdown(f"#### {title}")
+        st.caption(intro)
+        for it in items:
+            with st.expander(f"{it['status']} **{it['judul']}**: {it['nilai']}"):
+                st.markdown(f"**📘 Apa ini?** {it['apa']}\n\n"
+                            f"**🔍 Cara membaca:** {it['cara']}\n\n"
+                            f"**📏 Patokan umum:** {it['patokan']}")
+                st.info(f"**Artinya untuk saham ini:** {it['saham']}")
+    with st.container(border=True):
+        st.markdown("**📌 Pelajaran kunci**\n" + "\n".join(f"- {x}" for x in res["pelajaran"]))
+    st.download_button("⬇️ Simpan riset (.md)", research.to_markdown(res), file_name=f"{key}.md", mime="text/markdown", key=f"dl_{key}")
+    st.caption("Dibuat otomatis dari data Yahoo Finance. Patokan adalah aturan praktis umum, bukan rekomendasi investasi.")
 
 
 def render_holders(major, yahoo, summary, status, code):
@@ -558,6 +585,16 @@ with tab_detail:
                 st.markdown(f"{status} {text}")
         else:
             st.caption("Data harga belum cukup untuk analisis detail.")
+
+        if show("riset_fund"):
+            section("Riset fundamental (sambil belajar)")
+            render_research(research.fundamental(code, sector, fund, load_keystats(code), ind["harga"] if ind else None),
+                            f"riset-fundamental-{code}")
+
+        if show("riset_mf"):
+            section("Riset money flow (sambil belajar)")
+            render_research(research.money_flow(code, mf_daily, intra, acc, ind, lv,
+                                                analysis.trade_pressure(hist) if lv else None), f"riset-moneyflow-{code}")
 
         if lv and show("level"):
             # 2. Level harga
